@@ -1,0 +1,163 @@
+--- 
+title: "Scientific Co-authorship Network Analysis"
+output: html_document
+--- 
+  
+```{r libraries and load dataset}
+# Load libraries
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(gender)
+library(readxl)
+
+# Load the dataset
+df <- read_excel("10_data2014-2018.xls", sheet = 1)
+```
+
+```{r cleaning}
+# Filter journal articles
+cleaned_data <- df %>% filter(PublicationType == "J", grepl("Article", DocumentType))
+
+# Standardize journal names
+cleaned_data <- cleaned_data %>%
+  mutate(SourceTitle = str_trim(SourceTitle),
+         SourceTitle = str_replace(SourceTitle, "^The\\s+", ""),
+         SourceTitle = str_to_title(SourceTitle))
+
+# Filter by publication year
+cleaned_data <- cleaned_data %>% filter(PublicationYear >= 2014, PublicationYear <= 2018)
+
+# Trim whitespace
+cleaned_data <- cleaned_data %>% mutate(across(c(Authors, Addresses, ReprintAddresses, EmailAddresses), str_trim))
+
+# Flag missing ORCID / email
+cleaned_data <- cleaned_data %>%
+  mutate(ORCID_Missing = ifelse(is.na(ORCIDs), 1, 0),
+         Email_Missing = ifelse(is.na(EmailAddresses), 1, 0))
+
+# Split authors
+author_expanded <- cleaned_data %>%
+  separate_rows(Authors, sep = ";\\s*") %>%
+  group_by(DOI) %>% mutate(AuthorOrder = row_number()) %>% ungroup()
+
+# Separate Lastname / Firstname
+author_expanded <- author_expanded %>%
+  separate(Authors, into = c("Lastname", "Firstname"), sep = ",\\s*", extra = "merge", fill = "right") %>%
+  mutate(AuthorFullnames = paste(Lastname, Firstname, sep = ", "))
+
+# Extract organization type
+author_expanded <- author_expanded %>%
+  mutate(OrganizationType = case_when(
+    str_detect(Addresses, "University|Univ|College") ~ "University",
+    str_detect(Addresses, "Institute|Lab|Laboratory") ~ "Research",
+    TRUE ~ "Other"))
+
+# Extract country
+author_expanded <- author_expanded %>%
+  mutate(Country = str_extract(Addresses, "\\b[A-Z ]+$"),
+         Country = str_trim(Country))
+
+# Predict gender 
+unique_names <- na.omit(unique(author_expanded$Firstname))
+gender_result <- gender(unique_names, method = "ssa", years = 2012)
+
+author_expanded <- author_expanded %>%
+  left_join(gender_result %>% select(name, gender), by = c("Firstname" = "name")) %>%
+  mutate(Gender = ifelse(is.na(gender), "unknown", gender)) %>%
+  select(-gender)
+```
+
+```{r create}
+# Create UniqueAuthorID
+author_expanded <- author_expanded %>%
+  mutate(
+    Lastname = str_to_title(str_trim(Lastname)),
+    Firstname = str_replace_all(str_trim(Firstname), "\\s+", ""),
+    UniqueAuthorID = paste(Lastname, Firstname, Country, OrganizationType, sep = "_"))
+
+# Create nodes
+nodes <- author_expanded %>%
+  distinct(UniqueAuthorID, Firstname, Lastname, Gender, Country, OrganizationType) %>%
+  mutate(node_id = row_number())
+
+# Create edges between co-authors
+library(purrr)
+edges <- author_expanded %>%
+  select(DOI, UniqueAuthorID) %>%
+  group_by(DOI) %>%
+  filter(n() >= 2) %>%
+  summarise(pairs = list(combn(UniqueAuthorID, 2, simplify = FALSE)), .groups = "drop") %>%
+  unnest(pairs) %>%
+  mutate(from = map_chr(pairs, 1),
+         to   = map_chr(pairs, 2)) %>%
+  select(from, to)
+```
+
+```{r filter & igraph}
+# Filter by region (example: California USA)
+nodes_filtered <- nodes %>% filter(Country == "CA USA", Gender %in% c("male", "female"))
+edges_filtered <- edges %>%
+  filter(from %in% nodes_filtered$UniqueAuthorID & to %in% nodes_filtered$UniqueAuthorID)
+
+# Build igraph object
+library(igraph)
+graph_filtered <- graph_from_data_frame(d = edges_filtered, vertices = nodes_filtered, directed = FALSE)
+```
+
+```{r metrics}
+# Calculate centrality measures
+degree_centrality     <- degree(graph_filtered)
+betweenness_centrality <- betweenness(graph_filtered)
+closeness_centrality   <- closeness(graph_filtered)
+eigenvector_centrality <- eigen_centrality(graph_filtered)$vector
+
+# Add metrics to nodes
+nodes_filtered <- nodes_filtered %>%
+  mutate(degree = degree_centrality,
+         betweenness = betweenness_centrality,
+         closeness = closeness_centrality,
+         eigenvector = eigenvector_centrality)
+
+# Global metrics
+network_density <- edge_density(graph_filtered)
+connected_components <- components(graph_filtered)
+```
+
+```{r visualization 1}
+library(ggraph)
+library(ggplot2) 
+
+# Static visualization with labels for top 10 nodes
+top_nodes <- nodes_filtered %>%
+  arrange(desc(degree)) %>%
+  slice_head(n = 10)
+
+ggraph(graph_filtered, layout = "kk") +
+  geom_edge_link(alpha = 0.2, color = "grey") +
+  geom_node_point(aes(color = Gender), size = 3) +
+  geom_node_text(aes(label = ifelse(name %in% top_nodes$UniqueAuthorID, Lastname, "")),
+                 repel = TRUE, size = 2.5) +
+  labs(title = "Co-authorship Network (CA USA)",
+       subtitle = "Top 10 Authors (by Degree) Labeled - Colored by Gender") +
+  theme_minimal()
+```
+
+```{r visualization 2}
+# Interactive visualization
+library(networkD3)
+d3_graph <- igraph_to_networkD3(graph_filtered)
+d3_graph$nodes$group <- nodes_filtered$Gender
+
+forceNetwork(Links = d3_graph$links, Nodes = d3_graph$nodes,
+             Source = "source", Target = "target",
+             NodeID = "name", Group = "group",
+             opacity = 0.8, fontSize = 10, zoom = TRUE)
+```
+
+```{r export}
+# Export nodes and edges with metrics
+write.csv(nodes_filtered, "SIRLONGE_Valentin_data_nodes.csv", row.names = FALSE)
+write.csv(edges_filtered, "SIRLONGE_Valentin_data_edges.csv", row.names = FALSE)  
+``` 
+
