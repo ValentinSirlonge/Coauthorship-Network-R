@@ -5,6 +5,12 @@ This project investigates the collaboration patterns of marine science researche
 The main research question is:  
 **How do gender dynamics influence the structure of academic co-authorship networks in California?**
 
+<p align="center">
+  <img src="https://www.enago.com/academy/wp-content/uploads/2016/02/Difference-between-contributor-and-coauthor-1.png" 
+       alt="Scientific Co-authorship" 
+       width="400"/>
+</p>
+
 
 ## Methodology
 - **Data**: Extracted from Web of Science – journal articles (“J”, containing “Article”) published between 2014 and 2018 in marine sciences.
